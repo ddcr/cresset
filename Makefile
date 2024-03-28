@@ -25,8 +25,8 @@ PROJECT_ROOT = /opt/project
 # which unfortunately cannot use shell outputs in the file.
 # Image names have the usernames appended to them to prevent
 # name collisions between different users.
-# The timezone is Asia/Seoul by default because I live here.
-TZ ?= Asia/Seoul
+# The timezone is America/SaoPaulo by default because I live here.
+TZ ?= America/Sao_Paulo
 GID = $(shell id -g)
 UID = $(shell id -u)
 GRP = $(shell id -gn)

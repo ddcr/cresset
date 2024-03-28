@@ -9,3 +9,7 @@
 !**/*environment*.yaml
 !*conda-lock*.yaml
 !**/*conda-lock*.yaml
+!third_party/*.deb
+!**/**/torch*.whl
+!**/**/torchvision*.whl
+

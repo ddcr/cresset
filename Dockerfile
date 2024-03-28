@@ -100,7 +100,8 @@ RUN --mount=type=bind,from=curl-conda,source=/tmp/conda,target=/tmp/conda \
     printf "channels:\n  - conda-forge\n  - nodefaults\nssl_verify: false\n" > /opt/conda/.condarc && \
     $conda install -y python=${PYTHON_VERSION} && $conda clean -fya && \
     find /opt/conda -type d -name '__pycache__' | xargs rm -rf
-
+#    update-alternatives --install /usr/bin/python python /opt/conda/bin/python 1 && \
+#    update-alternatives --install /usr/bin/python3 python3 /opt/conda/bin/python3 1
 ########################################################################
 FROM install-conda AS build-base
 # `build-base` is the base stage for all heavy builds in the Dockerfile.
@@ -108,6 +109,7 @@ FROM install-conda AS build-base
 # Get build requirements. Set package versions manually if compatibility issues arise.
 ARG BUILD_REQS=/tmp/conda/build-requirements.txt
 COPY --link reqs/train-conda-build.requirements.txt ${BUILD_REQS}
+#COPY --link reqs/train-conda-build.requirements.pytorch.v1.txt ${BUILD_REQS}
 
 # Conda packages are preferable to system packages because they
 # are much more likely to be the latest (and the greatest!) packages.
@@ -166,7 +168,7 @@ ENV CMAKE_CUDA_COMPILER_LAUNCHER=ccache
 # Use LLD as the default linker for faster linking. Also update dynamic links.
 RUN ccache --set-config=cache_dir=/opt/ccache && ccache --max-size 0 && \
     ln -sf /opt/conda/bin/ld.lld /usr/bin/ld && \
-    ldconfig
+    /sbin/ldconfig
 
 ########################################################################
 FROM ${GIT_IMAGE} AS clone-torch
@@ -217,8 +219,8 @@ ARG TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 # Build wheel for installation in later stages.
 # Install PyTorch for subsidiary libraries (e.g., TorchVision).
 RUN --mount=type=cache,target=/opt/ccache \
-    python setup.py bdist_wheel -d /tmp/dist && \
-    python setup.py install
+    MAX_JOBS=4 python setup.py bdist_wheel -d /tmp/dist && \
+    MAX_JOBS=4 python setup.py install
 
 ###### Additional information for custom builds. ######
 
@@ -268,16 +270,6 @@ RUN if [ ! "$(lscpu | grep -q avx2)" ]; then CC="cc -mavx2"; fi && \
         Pillow-SIMD${PILLOW_SIMD_VERSION}
 
 ########################################################################
-FROM install-conda AS fetch-brew
-
-ARG HOMEBREW_CACHE=/home/linuxbrew/.cache
-ARG BREW_URL=https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
-ARG PATH=/opt/conda/bin:${PATH}
-RUN  --mount=type=cache,target=${HOMEBREW_CACHE},sharing=locked \
-     $conda install -y curl git && $conda clean -fya && \
-     NONINTERACTIVE=1 /bin/bash -c "$(curl -fksSL ${BREW_URL})"
-
-########################################################################
 FROM ${GIT_IMAGE} AS clone-vision
 
 ARG TORCHVISION_VERSION_TAG
@@ -321,19 +313,32 @@ RUN git clone --depth 1 ${ZSHS_URL} /opt/zsh/zsh-syntax-highlighting
 FROM install-conda AS fetch-torch
 
 # For users who wish to download wheels instead of building them.
+
+# Obs:
+#   Handle the scenario where a local directory contains Python wheels.
+#   Not very elegant code but saves an extra fetch stage
 ARG PYTORCH_INDEX_URL
 ARG PYTORCH_FETCH_NIGHTLY
 ARG PYTORCH_VERSION
-RUN if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
+ARG PYTORCH_LOCAL_WHEEL
+
+RUN if [ -z ${PYTORCH_LOCAL_WHEEL} ]; then \
         python -m pip wheel \
             --no-deps --wheel-dir /tmp/dist \
-            --index-url ${PYTORCH_INDEX_URL} \
-            torch==${PYTORCH_VERSION}; \
+            --no-index --find-links=file:/// \
+            third_party/${PYTORCH_LOCAL_WHEEL}; \
     else \
-        python -m pip wheel --pre \
-            --no-deps --wheel-dir /tmp/dist \
-            --index-url ${PYTORCH_INDEX_URL} \
-            torch; \
+        if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
+            python -m pip wheel \
+                --no-deps --wheel-dir /tmp/dist \
+                --index-url ${PYTORCH_INDEX_URL} \
+                torch==${PYTORCH_VERSION}; \
+        else \
+            python -m pip wheel --pre \
+                --no-deps --wheel-dir /tmp/dist \
+                --index-url ${PYTORCH_INDEX_URL} \
+                torch; \
+        fi \
     fi
 
 ########################################################################
@@ -342,16 +347,28 @@ FROM install-conda AS fetch-vision
 ARG PYTORCH_INDEX_URL
 ARG PYTORCH_FETCH_NIGHTLY
 ARG TORCHVISION_VERSION
-RUN if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
+ARG TORCHVISION_LOCAL_WHEEL
+# Obs:
+#   Handle the scenario where a local directory contains Python wheels.
+#   Not very elegant code but saves an extra fetch stage
+
+RUN if [ -z ${TORCHVISION_LOCAL_WHEEL} ]; then \
         python -m pip wheel \
             --no-deps --wheel-dir /tmp/dist \
-            --index-url ${PYTORCH_INDEX_URL} \
-            torchvision==${TORCHVISION_VERSION}; \
+            --no-index --find-links=file:/// \
+            third_party/${TORCHVISION_LOCAL_WHEEL}; \
     else \
-        python -m pip wheel --pre \
-            --no-deps --wheel-dir /tmp/dist \
-            --index-url ${PYTORCH_INDEX_URL} \
-            torchvision; \
+        if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
+            python -m pip wheel \
+                --no-deps --wheel-dir /tmp/dist \
+                --index-url ${PYTORCH_INDEX_URL} \
+                torchvision==${TORCHVISION_VERSION}; \
+        else \
+            python -m pip wheel --pre \
+                --no-deps --wheel-dir /tmp/dist \
+                --index-url ${PYTORCH_INDEX_URL} \
+                torchvision; \
+        fi \
     fi
 
 ########################################################################
@@ -360,6 +377,7 @@ FROM ${BUILD_IMAGE} AS train-stash
 # This stage prevents direct contact between the `train` stage and external files.
 # Other files such as `.deb` package files may also be stashed here.
 COPY --link reqs/train-apt.requirements.txt /tmp/apt/requirements.txt
+COPY --link third_party/*.deb /tmp/apt/
 
 ########################################################################
 FROM ${BUILD_IMAGE} AS train-builds-include
@@ -376,7 +394,6 @@ COPY --link --from=install-conda /opt/conda /opt/conda
 COPY --link --from=build-pillow  /tmp/dist  /tmp/dist
 COPY --link --from=build-vision  /tmp/dist  /tmp/dist
 COPY --link --from=fetch-pure    /opt/zsh   /opt/zsh
-COPY --link --from=fetch-brew /home/linuxbrew /home/linuxbrew
 
 ########################################################################
 FROM ${BUILD_IMAGE} AS train-builds-exclude
@@ -390,7 +407,6 @@ COPY --link --from=build-pillow  /tmp/dist  /tmp/dist
 COPY --link --from=fetch-torch   /tmp/dist  /tmp/dist
 COPY --link --from=fetch-vision  /tmp/dist  /tmp/dist
 COPY --link --from=fetch-pure    /opt/zsh   /opt/zsh
-COPY --link --from=fetch-brew /home/linuxbrew /home/linuxbrew
 
 ########################################################################
 FROM train-builds-${BUILD_MODE} AS train-builds
@@ -440,7 +456,7 @@ FROM ${TRAIN_IMAGE} AS train-base
 # Edit this section if necessary but use `docker-compose.yaml` if possible.
 # Common configurations performed before creating a user should be placed here.
 
-LABEL maintainer="veritas9872@gmail.com"
+LABEL maintainer="ddcr70@gmail.com"
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PYTHONIOENCODING=UTF-8
@@ -486,7 +502,6 @@ RUN groupadd -f -g ${GID} ${GRP} && \
 
 # Get conda with the directory ownership given to the user.
 COPY --link --from=train-builds --chown=${UID}:${GID} /opt/conda      /opt/conda
-COPY --link --from=train-builds --chown=${UID}:${GID} /home/linuxbrew /home/linuxbrew
 
 ########################################################################
 FROM train-base AS train-adduser-exclude
@@ -501,7 +516,6 @@ FROM train-base AS train-adduser-exclude
 # Note that this image does not require `zsh` but has `zsh` configs available.
 
 COPY --link --from=train-builds /opt/conda      /opt/conda
-COPY --link --from=train-builds /home/linuxbrew /home/linuxbrew
 
 ########################################################################
 FROM train-adduser-${ADD_USER} AS train
@@ -539,6 +553,11 @@ ENV MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,m
 
 RUN {   echo "fpath+=${PURE_PATH}"; \
         echo "autoload -Uz promptinit; promptinit"; \
+        # Change the `tmux` path color to cyan since
+        # the default blue is unreadable on a dark terminal.
+        echo "zmodload zsh/nearcolor"; \
+        echo "zstyle :prompt:pure:path color cyan"; \
+        echo "zstyle :prompt:pure:git:stash show yes"; \
         echo "prompt pure"; \
     } >> ${ZDOTDIR}/.zshrc && \
     # Add autosuggestions from terminal history. May be somewhat distracting.
@@ -547,16 +566,16 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
     {   echo "alias ll='ls -lh'"; \
         echo "alias wns='watch nvidia-smi'"; \
         echo "alias hist='history 1'"; \
+        echo "alias lsc='clear; ls -F'"; \
+        echo "alias rm='rm -i'"; \
+        echo "alias mv='mv -i'"; \
     } >> ${ZDOTDIR}/.zshrc && \
     # Syntax highlighting must be activated at the end of the `.zshrc` file.
     echo "source ${ZSHS_PATH}/zsh-syntax-highlighting.zsh" >> ${ZDOTDIR}/.zshrc && \
     # Configure `tmux` to use `zsh` as a non-login shell on startup.
     echo "set -g default-command $(which zsh)" >> /etc/tmux.conf && \
-    # Activate HomeBrew for Linux on login.
-    {   echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"'; \
-        # For some reason, `tmux` does not read `/etc/tmux.conf`.
-        echo 'cp /etc/tmux.conf ${HOME}/.tmux.conf'; \
-    } >> ${ZDOTDIR}/.zprofile && \
+    # For some reason, `tmux` does not read `/etc/tmux.conf`.
+    echo 'cp /etc/tmux.conf ${HOME}/.tmux.conf' >> ${ZDOTDIR}/.zprofile && \
     # Change `ZDOTDIR` directory permissions to allow configuration sharing.
     chmod 755 ${ZDOTDIR} && \
     # Clear out `/tmp` and restore its default permissions.
@@ -566,6 +585,6 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
 ENV PATH=/opt/conda/bin:${PATH}
 # `PROJECT_ROOT` is where the project code will reside.
 ARG PROJECT_ROOT=/opt/project
-ENV PYTHONPATH=${PROJECT_ROOT}
+ENV PYTHONPATH=${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}
 WORKDIR ${PROJECT_ROOT}
 CMD ["/bin/zsh"]
