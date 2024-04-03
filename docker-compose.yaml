@@ -101,6 +101,7 @@ services:
         # Installing `mamba` via mini-forge is strongly recommended.
         CONDA_URL: ${CONDA_URL:-https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh}
         CONDA_MANAGER: ${CONDA_MANAGER:-mamba}
+        IVSN_ENV: ${IVSN_ENV}
     deploy: # API dependent on compose version.
       resources:
         reservations:
@@ -139,9 +140,11 @@ services:
         PYTORCH_INDEX_URL: ${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cu121}
         # Set `PYTORCH_FETCH_NIGHTLY` to any value to fetch the nightly binaries.
         # Also remember to change the index url to the nightly version.
-        PYTORCH_FETCH_NIGHTLY: ${PYTORCH_FETCH_NIGHTLY:+--pre}
+        PYTORCH_FETCH_NIGHTLY: ${PYTORCH_FETCH_NIGHTLY:-pre}
         PYTORCH_VERSION: ${PYTORCH_VERSION:-2.1.2}
         TORCHVISION_VERSION: ${TORCHVISION_VERSION:-0.16.2}
+        PYTORCH_LOCAL_WHEEL: ${PYTORCH_LOCAL_WHEEL:-}
+        TORCHVISION_LOCAL_WHEEL: ${TORCHVISION_LOCAL_WHEEL:-}
         # URLs for faster `apt` and `pip` installs.
         # Use URLs optimized for location and security requirements.
 #        DEB_OLD: ${DEB_OLD:-http://archive.ubuntu.com}

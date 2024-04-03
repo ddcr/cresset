@@ -50,6 +50,8 @@ ARG GIT_IMAGE=bitnami/git:latest
 ARG BUILD_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-devel-${LINUX_DISTRO}${DISTRO_VERSION}
 ARG TRAIN_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-${IMAGE_FLAVOR}-${LINUX_DISTRO}${DISTRO_VERSION}
 
+ARG IVSN_ENV
+
 ########################################################################
 FROM ${GIT_IMAGE} AS curl-conda
 # An image used solely to download `conda` from the internet.
@@ -89,6 +91,8 @@ ENV conda=/opt/conda/bin/${CONDA_MANAGER}
 ENV PATH=/opt/conda/bin:${PATH}
 
 ARG PYTHON_VERSION
+ARG IVSN_ENV
+
 # The `.condarc` file in the installation directory portably configures the
 # `conda-forge` channel and removes the `defaults` channel if Miniconda is used.
 # No effect if Miniforge is used as this is the default anyway.
@@ -98,10 +102,13 @@ ARG PYTHON_VERSION
 RUN --mount=type=bind,from=curl-conda,source=/tmp/conda,target=/tmp/conda \
     /bin/bash /tmp/conda/miniconda.sh -b -p /opt/conda && \
     printf "channels:\n  - conda-forge\n  - nodefaults\nssl_verify: false\n" > /opt/conda/.condarc && \
-    $conda install -y python=${PYTHON_VERSION} && $conda clean -fya && \
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda create --name=${IVSN_ENV} -y python=${PYTHON_VERSION}; \
+    else \
+        $conda install -y python=${PYTHON_VERSION}; \
+    fi && \
+    $conda clean -fya && \
     find /opt/conda -type d -name '__pycache__' | xargs rm -rf
-#    update-alternatives --install /usr/bin/python python /opt/conda/bin/python 1 && \
-#    update-alternatives --install /usr/bin/python3 python3 /opt/conda/bin/python3 1
 ########################################################################
 FROM install-conda AS build-base
 # `build-base` is the base stage for all heavy builds in the Dockerfile.
@@ -109,7 +116,6 @@ FROM install-conda AS build-base
 # Get build requirements. Set package versions manually if compatibility issues arise.
 ARG BUILD_REQS=/tmp/conda/build-requirements.txt
 COPY --link reqs/train-conda-build.requirements.txt ${BUILD_REQS}
-#COPY --link reqs/train-conda-build.requirements.pytorch.v1.txt ${BUILD_REQS}
 
 # Conda packages are preferable to system packages because they
 # are much more likely to be the latest (and the greatest!) packages.
@@ -130,6 +136,8 @@ COPY --link reqs/train-conda-build.requirements.txt ${BUILD_REQS}
 ARG MKL_MODE
 ARG CUDA_VERSION
 ARG CONDA_PKGS_DIRS=/opt/conda/pkgs
+ARG PYTHON_VERSION
+ARG IVSN_ENV
 RUN --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
     if [ "${MKL_MODE}" = "include" ]; then \
     {   echo 'mkl'; \
@@ -139,10 +147,14 @@ RUN --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
       echo 'nomkl' >> ${BUILD_REQS}; \
     else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
     echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
-    $conda install -y --file ${BUILD_REQS}
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda install --name=${IVSN_ENV} -y --file ${BUILD_REQS}; \
+    else \
+        $conda install -y --file ${BUILD_REQS}; \
+    fi
 
 # Use Jemalloc as the system memory allocator for efficient memory management.
-ENV LD_PRELOAD=/opt/conda/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
+ENV LD_PRELOAD=/opt/conda/${IVSN_ENV:+envs/${IVSN_ENV}}/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
 # See the documentation for an explanation of the following configuration.
 # https://android.googlesource.com/platform/external/jemalloc_new/+/6e6a93170475c05ebddbaf3f0df6add65ba19f01/TUNING.md
 ENV MALLOC_CONF=background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,muzzy_decay_ms:30000
@@ -159,7 +171,7 @@ WORKDIR /opt/ccache
 # Force `ccache` to use the faster `direct_mode`.
 # N.B. Direct mode is enabled merely by defining `CCACHE_DIRECT`.
 ENV CCACHE_DIRECT=True
-ENV PATH=/opt/conda/bin/ccache:${PATH}
+ENV PATH=/opt/conda/${IVSN_ENV:+envs/${IVSN_ENV}}/bin:${PATH}
 # Ensure that `ccache` is used by `cmake`.
 ENV CMAKE_C_COMPILER_LAUNCHER=ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -167,7 +179,7 @@ ENV CMAKE_CUDA_COMPILER_LAUNCHER=ccache
 
 # Use LLD as the default linker for faster linking. Also update dynamic links.
 RUN ccache --set-config=cache_dir=/opt/ccache && ccache --max-size 0 && \
-    ln -sf /opt/conda/bin/ld.lld /usr/bin/ld && \
+    ln -sf /opt/conda/${IVSN_ENV:+envs/${IVSN_ENV}}/bin/ld.lld /usr/bin/ld && \
     /sbin/ldconfig
 
 ########################################################################
@@ -218,9 +230,17 @@ ARG TORCH_CUDA_ARCH_LIST
 ARG TORCH_NVCC_FLAGS="-Xfatbin -compress-all"
 # Build wheel for installation in later stages.
 # Install PyTorch for subsidiary libraries (e.g., TorchVision).
+ARG PYTHON_VERSION
+ARG IVSN_ENV
+
 RUN --mount=type=cache,target=/opt/ccache \
-    MAX_JOBS=4 python setup.py bdist_wheel -d /tmp/dist && \
-    MAX_JOBS=4 python setup.py install
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        MAX_JOBS=4 $conda run --name ${IVSN_ENV} python setup.py bdist_wheel -d /tmp/dist && \
+        MAX_JOBS=4 $conda run --name ${IVSN_ENV} python setup.py install; \
+    else \
+        MAX_JOBS=4 python setup.py bdist_wheel -d /tmp/dist && \
+        MAX_JOBS=4 python setup.py install; \
+    fi
 
 ###### Additional information for custom builds. ######
 
@@ -256,18 +276,28 @@ RUN --mount=type=cache,target=/opt/ccache \
 
 ########################################################################
 FROM install-conda AS build-pillow
+ARG PYTHON_VERSION
+ARG IVSN_ENV
 # This stage is derived from `install-conda` instead of `build-base`
 # as it is very lightweight and does not require many dependencies.
-RUN $conda install -y libjpeg-turbo zlib && $conda clean -fya
-
+RUN if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda install --name=${IVSN_ENV} -y libjpeg-turbo zlib && $conda clean -fya; \
+    else \
+        $conda install -y libjpeg-turbo zlib && $conda clean -fya; \
+    fi
 # Specify the `Pillow-SIMD` version if necessary. The variable is not used yet.
 # Set as `PILLOW_SIMD_VERSION="==VERSION_NUMBER"` for use in the current setup.
 ARG PILLOW_SIMD_VERSION
 # The condition ensures that AVX2 instructions are built only if available.
 # May cause issues if the image is used on a machine with a different SIMD ISA.
 RUN if [ ! "$(lscpu | grep -q avx2)" ]; then CC="cc -mavx2"; fi && \
-    python -m pip wheel --no-deps --wheel-dir /tmp/dist \
-        Pillow-SIMD${PILLOW_SIMD_VERSION}
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda run --name=${IVSN_ENV} python -m pip wheel --no-deps --wheel-dir /tmp/dist \
+        Pillow-SIMD${PILLOW_SIMD_VERSION}; \
+    else \
+        python -m pip wheel --no-deps --wheel-dir /tmp/dist \
+        Pillow-SIMD${PILLOW_SIMD_VERSION}; \
+    fi
 
 ########################################################################
 FROM ${GIT_IMAGE} AS clone-vision
@@ -284,18 +314,29 @@ FROM build-torch AS build-vision
 WORKDIR /opt/vision
 COPY --link --from=clone-vision /opt/vision /opt/vision
 
+ARG PYTHON_VERSION
+ARG IVSN_ENV
 # Install Pillow-SIMD before TorchVision build and add it to `/tmp/dist`.
 # Pillow will be uninstalled if it is present.
 RUN --mount=type=bind,from=build-pillow,source=/tmp/dist,target=/tmp/dist \
-    python -m pip uninstall -y pillow && \
-    python -m pip install --no-deps /tmp/dist/*
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda run --name=${IVSN_ENV} python -m pip uninstall -y pillow && \
+        $conda run --name=${IVSN_ENV} python -m pip install --no-deps /tmp/dist/* \
+    else \
+        python -m pip uninstall -y pillow && \
+        python -m pip install --no-deps /tmp/dist/* \
+    fi
 
 ARG USE_CUDA
 ARG USE_PRECOMPILED_HEADERS
 ARG FORCE_CUDA=${USE_CUDA}
 ARG TORCH_CUDA_ARCH_LIST
 RUN --mount=type=cache,target=/opt/ccache \
-    python setup.py bdist_wheel -d /tmp/dist
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda run --name=${IVSN_ENV} python setup.py bdist_wheel -d /tmp/dist \
+    else \
+        python setup.py bdist_wheel -d /tmp/dist \
+    fi
 
 ########################################################################
 FROM ${GIT_IMAGE} AS fetch-pure
@@ -313,32 +354,19 @@ RUN git clone --depth 1 ${ZSHS_URL} /opt/zsh/zsh-syntax-highlighting
 FROM install-conda AS fetch-torch
 
 # For users who wish to download wheels instead of building them.
-
-# Obs:
-#   Handle the scenario where a local directory contains Python wheels.
-#   Not very elegant code but saves an extra fetch stage
 ARG PYTORCH_INDEX_URL
 ARG PYTORCH_FETCH_NIGHTLY
 ARG PYTORCH_VERSION
-ARG PYTORCH_LOCAL_WHEEL
-
-RUN if [ -z ${PYTORCH_LOCAL_WHEEL} ]; then \
-        python -m pip wheel \
+RUN if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
+        $conda run --name=${IVSN_ENV} python -m pip wheel \
             --no-deps --wheel-dir /tmp/dist \
-            --no-index --find-links=file:/// \
-            third_party/${PYTORCH_LOCAL_WHEEL}; \
+            --index-url ${PYTORCH_INDEX_URL} \
+            torch==${PYTORCH_VERSION}; \
     else \
-        if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
-            python -m pip wheel \
-                --no-deps --wheel-dir /tmp/dist \
-                --index-url ${PYTORCH_INDEX_URL} \
-                torch==${PYTORCH_VERSION}; \
-        else \
-            python -m pip wheel --pre \
-                --no-deps --wheel-dir /tmp/dist \
-                --index-url ${PYTORCH_INDEX_URL} \
-                torch; \
-        fi \
+        $conda run --name=${IVSN_ENV} python -m pip wheel --pre \
+            --no-deps --wheel-dir /tmp/dist \
+            --index-url ${PYTORCH_INDEX_URL} \
+            torch; \
     fi
 
 ########################################################################
@@ -347,28 +375,16 @@ FROM install-conda AS fetch-vision
 ARG PYTORCH_INDEX_URL
 ARG PYTORCH_FETCH_NIGHTLY
 ARG TORCHVISION_VERSION
-ARG TORCHVISION_LOCAL_WHEEL
-# Obs:
-#   Handle the scenario where a local directory contains Python wheels.
-#   Not very elegant code but saves an extra fetch stage
-
-RUN if [ -z ${TORCHVISION_LOCAL_WHEEL} ]; then \
-        python -m pip wheel \
+RUN if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
+        $conda run --name=${IVSN_ENV} python -m pip wheel \
             --no-deps --wheel-dir /tmp/dist \
-            --no-index --find-links=file:/// \
-            third_party/${TORCHVISION_LOCAL_WHEEL}; \
+            --index-url ${PYTORCH_INDEX_URL} \
+            torchvision==${TORCHVISION_VERSION}; \
     else \
-        if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
-            python -m pip wheel \
-                --no-deps --wheel-dir /tmp/dist \
-                --index-url ${PYTORCH_INDEX_URL} \
-                torchvision==${TORCHVISION_VERSION}; \
-        else \
-            python -m pip wheel --pre \
-                --no-deps --wheel-dir /tmp/dist \
-                --index-url ${PYTORCH_INDEX_URL} \
-                torchvision; \
-        fi \
+        $conda run --name=${IVSN_ENV} python -m pip wheel --pre \
+            --no-deps --wheel-dir /tmp/dist \
+            --index-url ${PYTORCH_INDEX_URL} \
+            torchvision; \
     fi
 
 ########################################################################
@@ -409,6 +425,24 @@ COPY --link --from=fetch-vision  /tmp/dist  /tmp/dist
 COPY --link --from=fetch-pure    /opt/zsh   /opt/zsh
 
 ########################################################################
+FROM ${BUILD_IMAGE} AS train-builds-exclude-with-local
+# No compiled libraries copied over in exclude mode except Pillow-SIMD.
+# Note that `fetch` stages are derived from the `install-conda` stage
+# with no dependency on the `build-base` stage. This skips installation
+# of any build-time dependencies, saving both time and space.
+ARG PYTORCH_LOCAL_WHEEL
+ARG TORCHVISION_LOCAL_WHEEL
+
+COPY --link --from=install-conda /opt/conda /opt/conda
+COPY --link --from=build-pillow  /tmp/dist  /tmp/dist
+COPY --link third_party/${PYTORCH_LOCAL_WHEEL} /tmp/dist
+COPY --link third_party/${TORCHVISION_LOCAL_WHEEL} /tmp/dist
+COPY --link --from=fetch-pure    /opt/zsh   /opt/zsh
+
+########################################################################
+#
+# BUILD_MODE = [include|exclude|exclude-with-local]
+#
 FROM train-builds-${BUILD_MODE} AS train-builds
 # Gather Python packages built in previous stages and
 # install using both conda and pip with a single file.
@@ -429,6 +463,8 @@ RUN {   echo "[global]"; \
 # See the `install-conda` stage above for details.
 ARG CONDA_MANAGER
 ARG conda=/opt/conda/bin/${CONDA_MANAGER}
+ARG IVSN_ENV
+
 # Using `PIP_CACHE_DIR` and `CONDA_PKGS_DIRS`, both of which are
 # native cache directory variables, to cache installations.
 # Unclear which path `pip` inside a `conda` install uses for caching, however.
@@ -442,7 +478,7 @@ COPY --link reqs/train-environment.yaml ${CONDA_ENV_FILE}
 RUN --mount=type=cache,target=${PIP_CACHE_DIR},sharing=locked \
     --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
     find /tmp/dist -name '*.whl' | sed 's/^/      - /' >> ${CONDA_ENV_FILE} && \
-    $conda env update --file ${CONDA_ENV_FILE} && \
+    $conda env update --name=${IVSN_ENV} --file ${CONDA_ENV_FILE} && \
     find /opt/conda -type d -name '__pycache__' | xargs rm -rf
 
 # Enable Intel MKL optimizations on AMD CPUs.
@@ -468,6 +504,8 @@ ARG DEB_OLD
 ARG DEB_NEW
 # `tzdata` requires noninteractive mode.
 ARG DEBIAN_FRONTEND=noninteractive
+ARG POETRY_URL=https://install.python-poetry.org
+ARG STARSHIP_PROMPT_URL=https://starship.rs/install.sh
 # Using `sed` and `xargs` to imitate the behavior of a requirements file.
 # The `--mount=type=bind` temporarily mounts a directory from another stage.
 # `apt` requirements are copied from the `train-stash` stage instead of from
@@ -481,7 +519,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     if [ ${DEB_NEW} ]; then sed -i "s%${DEB_OLD}%${DEB_NEW}%g" /etc/apt/sources.list; fi && \
     apt-get update && sed -e 's/#.*//g' -e 's/\r//g' /tmp/apt/requirements.txt | \
     xargs apt-get install -y --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    curl -sSL ${POETRY_URL} | POETRY_HOME=/opt/conda python3 - && \
+    curl -sS ${STARSHIP_PROMPT_URL} | sh
 
 ########################################################################
 FROM train-base AS train-adduser-include
@@ -526,6 +566,10 @@ FROM train-adduser-${ADD_USER} AS train
 # See the `zsh` manual for details. https://zsh-manual.netlify.app/files
 ENV ZDOTDIR=/root
 
+ARG CONDA_MANAGER
+ARG conda=/opt/conda/bin/${CONDA_MANAGER}
+ARG IVSN_ENV
+
 # Setting the prompt to `pure`, which is available on all terminals without additional settings.
 # This is a personal preference and users may use any prompt that they wish (e.g., `oh-my-zsh`).
 ARG PURE_PATH=${ZDOTDIR}/.zsh/pure
@@ -541,14 +585,16 @@ COPY --link --from=train-builds /opt/zsh/zsh-syntax-highlighting ${ZSHS_PATH}
 ENV KMP_BLOCKTIME=0
 # Configure CPU thread affinity.
 # ENV KMP_AFFINITY="granularity=fine,compact,1,0"
-ENV LD_PRELOAD=/opt/conda/lib/libiomp5.so${LD_PRELOAD:+:${LD_PRELOAD}}
+# ENV LD_PRELOAD=/opt/conda/lib/libiomp5.so${LD_PRELOAD:+:${LD_PRELOAD}}
+ENV LD_PRELOAD=/opt/conda/${IVSN_ENV:+envs/${IVSN_ENV}}/lib/libiomp5.so${LD_PRELOAD:+:${LD_PRELOAD}}
 
 # Enable Intel MKL optimizations on AMD CPUs. https://danieldk.eu/Posts/2020-08-31-MKL-Zen.html
 ENV MKL_DEBUG_CPU_TYPE=5
 ENV LD_PRELOAD=/opt/conda/libfakeintel.so${LD_PRELOAD:+:${LD_PRELOAD}}
 
 # Use Jemalloc for efficient memory management.
-ENV LD_PRELOAD=/opt/conda/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
+# ENV LD_PRELOAD=/opt/conda/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
+ENV LD_PRELOAD=/opt/conda/${IVSN_ENV:+envs/${IVSN_ENV}}/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
 ENV MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,muzzy_decay_ms:30000"
 
 RUN {   echo "fpath+=${PURE_PATH}"; \
@@ -569,6 +615,7 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
         echo "alias lsc='clear; ls -F'"; \
         echo "alias rm='rm -i'"; \
         echo "alias mv='mv -i'"; \
+        echo "eval '$(starship init zsh)'"; \
     } >> ${ZDOTDIR}/.zshrc && \
     # Syntax highlighting must be activated at the end of the `.zshrc` file.
     echo "source ${ZSHS_PATH}/zsh-syntax-highlighting.zsh" >> ${ZDOTDIR}/.zshrc && \
@@ -580,7 +627,10 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
     chmod 755 ${ZDOTDIR} && \
     # Clear out `/tmp` and restore its default permissions.
     rm -rf /tmp && mkdir /tmp && chmod 1777 /tmp && \
-    ldconfig  # Update dynamic link cache.
+    # Update dynamic link cache.
+    ldconfig && \
+    $conda init zsh
+
 
 ENV PATH=/opt/conda/bin:${PATH}
 # `PROJECT_ROOT` is where the project code will reside.

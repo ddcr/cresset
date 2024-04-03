@@ -54,6 +54,9 @@ COMMAND=${COMMAND}\n$\
 TZ=${TZ}\n$\
 "
 
+# COMPOSE_CMD=docker-compose
+COMPOSE_CMD=docker compose
+
 # The `.env` file must be checked via shell as is cannot be a Makefile target.
 # Doing so would make it impossible to reference `.env` in the `-include` command.
 env:  # Creates the `.env` file if it does not exist.
@@ -101,26 +104,26 @@ ENV_FILE = .env
 -include ${ENV_FILE}
 
 build: check vs # Rebuild the image before creating a new container.
-	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 \
-	docker compose -p ${PROJECT} up	--build -d ${SERVICE}
+	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain \
+	${COMPOSE_CMD} -p ${PROJECT} up	--build -d ${SERVICE}
 build-only: check # Build the image without creating a new container.
 	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 \
-	docker compose -p ${PROJECT} build ${SERVICE}
+	${COMPOSE_CMD} -p ${PROJECT} build ${SERVICE}
 up: check vs  # Start service. Creates a new container from the image.
 	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 \
-	docker compose -p ${PROJECT} up -d ${SERVICE}
+	${COMPOSE_CMD} -p ${PROJECT} up -d ${SERVICE}
 exec:  # Execute service. Enter interactive shell.
 	DOCKER_BUILDKIT=1 \
-	docker compose -p ${PROJECT} exec ${SERVICE} ${COMMAND}
+	${COMPOSE_CMD} -p ${PROJECT} exec ${SERVICE} ${COMMAND}
 # Useful if the previous container must not be deleted.
 start:  # Start a stopped service without recreating the container.
-	docker compose -p ${PROJECT} start ${SERVICE}
+	${COMPOSE_CMD} -p ${PROJECT} start ${SERVICE}
 down:  # Shut down the service and delete containers, volumes, networks, etc.
-	docker compose -p ${PROJECT} down
+	${COMPOSE_CMD} -p ${PROJECT} down
 run: check vs  # Used for debugging cases where the service will not start.
-	docker compose -p ${PROJECT} run --rm ${SERVICE} ${COMMAND}
+	${COMPOSE_CMD} -p ${PROJECT} run --rm ${SERVICE} ${COMMAND}
 ls:  # List all services.
-	docker compose ls -a
+	${COMPOSE_CMD} ls -a
 
 # Utility for installing Docker Compose on Linux (but not WSL) systems.
 # Visit https://docs.docker.com/compose/install for the full documentation.
