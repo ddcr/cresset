@@ -66,8 +66,10 @@ FROM ${GIT_IMAGE} AS curl-conda
 # https://www.anaconda.com/end-user-license-agreement-miniconda
 
 ARG CONDA_URL
+ARG POETRY_URL=https://install.python-poetry.org
 WORKDIR /tmp/conda
-RUN curl -fksSL -o /tmp/conda/miniconda.sh ${CONDA_URL}
+RUN curl -fksSL -o /tmp/conda/miniconda.sh ${CONDA_URL} && \
+    curl -fksSL -o /tmp/conda/poetry_install.py ${POETRY_URL}
 
 ########################################################################
 FROM ${BUILD_IMAGE} AS install-conda
@@ -107,6 +109,7 @@ RUN --mount=type=bind,from=curl-conda,source=/tmp/conda,target=/tmp/conda \
     else \
         $conda install -y python=${PYTHON_VERSION}; \
     fi && \
+    POETRY_HOME=/opt/conda $conda run python /tmp/conda/poetry_install.py -y && \
     $conda clean -fya && \
     find /opt/conda -type d -name '__pycache__' | xargs rm -rf
 ########################################################################
@@ -139,17 +142,25 @@ ARG CONDA_PKGS_DIRS=/opt/conda/pkgs
 ARG PYTHON_VERSION
 ARG IVSN_ENV
 RUN --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
-    if [ "${MKL_MODE}" = "include" ]; then \
-    {   echo 'mkl'; \
-        echo 'mkl-include'; \
-    } >> ${BUILD_REQS}; \
-    elif [ "${MKL_MODE}" = "exclude" ]; then \
-      echo 'nomkl' >> ${BUILD_REQS}; \
-    else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
-    echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
     if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        if [ "${MKL_MODE}" = "include" ]; then \
+        {   echo 'mkl=2024.0'; \
+            echo 'mkl-include=2024.0'; \
+        } >> ${BUILD_REQS}; \
+        elif [ "${MKL_MODE}" = "exclude" ]; then \
+        echo 'nomkl' >> ${BUILD_REQS}; \
+        else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
+        echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
         $conda install --name=${IVSN_ENV} -y --file ${BUILD_REQS}; \
     else \
+        if [ "${MKL_MODE}" = "include" ]; then \
+        {   echo 'mkl'; \
+            echo 'mkl-include'; \
+        } >> ${BUILD_REQS}; \
+        elif [ "${MKL_MODE}" = "exclude" ]; then \
+        echo 'nomkl' >> ${BUILD_REQS}; \
+        else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
+        echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
         $conda install -y --file ${BUILD_REQS}; \
     fi
 
@@ -321,10 +332,10 @@ ARG IVSN_ENV
 RUN --mount=type=bind,from=build-pillow,source=/tmp/dist,target=/tmp/dist \
     if [ "${PYTHON_VERSION}" != "3.10" ]; then \
         $conda run --name=${IVSN_ENV} python -m pip uninstall -y pillow && \
-        $conda run --name=${IVSN_ENV} python -m pip install --no-deps /tmp/dist/* \
+        $conda run --name=${IVSN_ENV} python -m pip install --no-deps /tmp/dist/*; \
     else \
         python -m pip uninstall -y pillow && \
-        python -m pip install --no-deps /tmp/dist/* \
+        python -m pip install --no-deps /tmp/dist/*; \
     fi
 
 ARG USE_CUDA
@@ -333,9 +344,9 @@ ARG FORCE_CUDA=${USE_CUDA}
 ARG TORCH_CUDA_ARCH_LIST
 RUN --mount=type=cache,target=/opt/ccache \
     if [ "${PYTHON_VERSION}" != "3.10" ]; then \
-        $conda run --name=${IVSN_ENV} python setup.py bdist_wheel -d /tmp/dist \
+        $conda run --name=${IVSN_ENV} python setup.py bdist_wheel -d /tmp/dist; \
     else \
-        python setup.py bdist_wheel -d /tmp/dist \
+        python setup.py bdist_wheel -d /tmp/dist; \
     fi
 
 ########################################################################
@@ -463,6 +474,8 @@ RUN {   echo "[global]"; \
 # See the `install-conda` stage above for details.
 ARG CONDA_MANAGER
 ARG conda=/opt/conda/bin/${CONDA_MANAGER}
+
+ARG PYTHON_VERSION
 ARG IVSN_ENV
 
 # Using `PIP_CACHE_DIR` and `CONDA_PKGS_DIRS`, both of which are
@@ -478,7 +491,11 @@ COPY --link reqs/train-environment.yaml ${CONDA_ENV_FILE}
 RUN --mount=type=cache,target=${PIP_CACHE_DIR},sharing=locked \
     --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
     find /tmp/dist -name '*.whl' | sed 's/^/      - /' >> ${CONDA_ENV_FILE} && \
-    $conda env update --name=${IVSN_ENV} --file ${CONDA_ENV_FILE} && \
+    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
+        $conda env update --name=${IVSN_ENV} --file ${CONDA_ENV_FILE}; \
+    else \
+        $conda env update --file ${CONDA_ENV_FILE}; \
+    fi && \
     find /opt/conda -type d -name '__pycache__' | xargs rm -rf
 
 # Enable Intel MKL optimizations on AMD CPUs.
@@ -504,7 +521,7 @@ ARG DEB_OLD
 ARG DEB_NEW
 # `tzdata` requires noninteractive mode.
 ARG DEBIAN_FRONTEND=noninteractive
-ARG POETRY_URL=https://install.python-poetry.org
+
 ARG STARSHIP_PROMPT_URL=https://starship.rs/install.sh
 # Using `sed` and `xargs` to imitate the behavior of a requirements file.
 # The `--mount=type=bind` temporarily mounts a directory from another stage.
@@ -520,8 +537,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && sed -e 's/#.*//g' -e 's/\r//g' /tmp/apt/requirements.txt | \
     xargs apt-get install -y --no-install-recommends && \
     rm -rf /var/lib/apt/lists/* && \
-    curl -sSL ${POETRY_URL} | POETRY_HOME=/opt/conda python3 - && \
-    curl -sS ${STARSHIP_PROMPT_URL} | sh
+    curl -sS ${STARSHIP_PROMPT_URL} | FORCE=1 sh
 
 ########################################################################
 FROM train-base AS train-adduser-include
@@ -615,7 +631,7 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
         echo "alias lsc='clear; ls -F'"; \
         echo "alias rm='rm -i'"; \
         echo "alias mv='mv -i'"; \
-        echo "eval '$(starship init zsh)'"; \
+        echo "$(starship init zsh)"; \
     } >> ${ZDOTDIR}/.zshrc && \
     # Syntax highlighting must be activated at the end of the `.zshrc` file.
     echo "source ${ZSHS_PATH}/zsh-syntax-highlighting.zsh" >> ${ZDOTDIR}/.zshrc && \

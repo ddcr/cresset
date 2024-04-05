@@ -104,10 +104,10 @@ ENV_FILE = .env
 -include ${ENV_FILE}
 
 build: check vs # Rebuild the image before creating a new container.
-	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=plain \
+	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=auto \
 	${COMPOSE_CMD} -p ${PROJECT} up	--build -d ${SERVICE}
 build-only: check # Build the image without creating a new container.
-	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 \
+	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 BUILDKIT_PROGRESS=auto \
 	${COMPOSE_CMD} -p ${PROJECT} build ${SERVICE}
 up: check vs  # Start service. Creates a new container from the image.
 	COMPOSE_DOCKER_CLI_BUILD=1 DOCKER_BUILDKIT=1 \
