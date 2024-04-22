@@ -59,13 +59,13 @@ services:
       TORCH_CUDNN_V8_API_DEBUG: 0 # Enable to verify whether the cuDNN v8 frontend is being used.
       # Lazy loading: https://docs.nvidia.com/cuda/cuda-c-programming-guide/lazy-loading.html
       CUDA_MODULE_LOADING: LAZY # Effective only on CUDA 11.7+.
-    # tmpfs:  # Create directory in RAM for fast data IO.
-    #   - /opt/data
-    # Default volume pairings of ${HOST_PATH}:${CONTAINER_PATH}.
-    # Allows the container to access `HOST_PATH` as `CONTAINER_PATH`.
-    # See https://docs.docker.com/storage/volumes for details.
-    # Always use the ${HOME} variable to specify the host home directory.
-    # See https://github.com/docker/compose/issues/6506 for details.
+      # tmpfs:  # Create directory in RAM for fast data IO.
+      #   - /opt/data
+      # Default volume pairings of ${HOST_PATH}:${CONTAINER_PATH}.
+      # Allows the container to access `HOST_PATH` as `CONTAINER_PATH`.
+      # See https://docs.docker.com/storage/volumes for details.
+      # Always use the ${HOME} variable to specify the host home directory.
+      # See https://github.com/docker/compose/issues/6506 for details.
     volumes: # Equivalent to `-v` flag in `docker run`.
       # Current working directory `.` is connected to `PROJECT_ROOT`.
       # Mount `.` if the docker-compose.yaml file is at the project root.

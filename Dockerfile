@@ -142,27 +142,15 @@ ARG CONDA_PKGS_DIRS=/opt/conda/pkgs
 ARG PYTHON_VERSION
 ARG IVSN_ENV
 RUN --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
-    if [ "${PYTHON_VERSION}" != "3.10" ]; then \
-        if [ "${MKL_MODE}" = "include" ]; then \
-        {   echo 'mkl=2024.0'; \
-            echo 'mkl-include=2024.0'; \
-        } >> ${BUILD_REQS}; \
-        elif [ "${MKL_MODE}" = "exclude" ]; then \
-        echo 'nomkl' >> ${BUILD_REQS}; \
-        else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
-        echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
-        $conda install --name=${IVSN_ENV} -y --file ${BUILD_REQS}; \
-    else \
-        if [ "${MKL_MODE}" = "include" ]; then \
-        {   echo 'mkl'; \
-            echo 'mkl-include'; \
-        } >> ${BUILD_REQS}; \
-        elif [ "${MKL_MODE}" = "exclude" ]; then \
-        echo 'nomkl' >> ${BUILD_REQS}; \
-        else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
-        echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
-        $conda install -y --file ${BUILD_REQS}; \
-    fi
+    if [ "${MKL_MODE}" = "include" ]; then \
+    {   echo 'mkl=2024.0'; \
+        echo 'mkl-include=2024.0'; \
+    } >> ${BUILD_REQS}; \
+    elif [ "${MKL_MODE}" = "exclude" ]; then \
+    echo 'nomkl' >> ${BUILD_REQS}; \
+    else echo "Invalid `MKL_MODE`: ${MKL_MODE}." && exit -1; fi && \
+    echo "pytorch::magma-cuda$(echo ${CUDA_VERSION} | sed 's/\.//; s/\..*//')" >> ${BUILD_REQS} && \
+    $conda install ${IVSN_ENV:+--name=${IVSN_ENV}} -y --file ${BUILD_REQS}
 
 # Use Jemalloc as the system memory allocator for efficient memory management.
 ENV LD_PRELOAD=/opt/conda/${IVSN_ENV:+envs/${IVSN_ENV}}/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
@@ -491,6 +479,7 @@ COPY --link reqs/train-environment.yaml ${CONDA_ENV_FILE}
 RUN --mount=type=cache,target=${PIP_CACHE_DIR},sharing=locked \
     --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
     find /tmp/dist -name '*.whl' | sed 's/^/      - /' >> ${CONDA_ENV_FILE} && \
+    $conda clean -y --all && \
     if [ "${PYTHON_VERSION}" != "3.10" ]; then \
         $conda env update --name=${IVSN_ENV} --file ${CONDA_ENV_FILE}; \
     else \
@@ -631,6 +620,7 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
         echo "alias lsc='clear; ls -F'"; \
         echo "alias rm='rm -i'"; \
         echo "alias mv='mv -i'"; \
+        echo "export STARSHIP_CONFIG='${ZDOTDIR}/.config/starship.toml'"; \
         echo "$(starship init zsh)"; \
     } >> ${ZDOTDIR}/.zshrc && \
     # Syntax highlighting must be activated at the end of the `.zshrc` file.
@@ -645,8 +635,17 @@ RUN {   echo "fpath+=${PURE_PATH}"; \
     rm -rf /tmp && mkdir /tmp && chmod 1777 /tmp && \
     # Update dynamic link cache.
     ldconfig && \
+    # customize starship configuration
+    mkdir -p ${ZDOTDIR}/.config && \
+    {   echo "\"\$schema\" = 'https://starship.rs/config-schema.json'"; \
+        echo "[conda]"; \
+        echo "ignore_base = false"; \
+    } >> ${ZDOTDIR}/.config/starship.toml && \
     $conda init zsh
 
+RUN if [ ! -z ${IVSN_ENV} ]; then \
+    $conda env config vars set LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/conda/envs/${IVSN_ENV}/lib -n ${IVSN_ENV}; \
+fi
 
 ENV PATH=/opt/conda/bin:${PATH}
 # `PROJECT_ROOT` is where the project code will reside.
