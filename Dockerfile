@@ -350,6 +350,12 @@ RUN git clone --depth 1 ${ZSHA_URL} /opt/zsh/zsh-autosuggestions
 RUN git clone --depth 1 ${ZSHS_URL} /opt/zsh/zsh-syntax-highlighting
 
 ########################################################################
+# WARN
+# WARN
+# WARN   PROBLEMS HERE!!!!!
+# WARN   Not working here:
+# WARN   $conda run ${IVSN_ENV:+--name=${IVSN_ENV}} python -m pip wheel [...]
+
 FROM install-conda AS fetch-torch
 
 # For users who wish to download wheels instead of building them.
@@ -357,12 +363,12 @@ ARG PYTORCH_INDEX_URL
 ARG PYTORCH_FETCH_NIGHTLY
 ARG PYTORCH_VERSION
 RUN if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
-        $conda run --name=${IVSN_ENV} python -m pip wheel \
+        $conda run ${IVSN_ENV:+--name=${IVSN_ENV}} python -m pip wheel \
             --no-deps --wheel-dir /tmp/dist \
             --index-url ${PYTORCH_INDEX_URL} \
             torch==${PYTORCH_VERSION}; \
     else \
-        $conda run --name=${IVSN_ENV} python -m pip wheel --pre \
+        $conda run ${IVSN_ENV:+--name=${IVSN_ENV}} python -m pip wheel --pre \
             --no-deps --wheel-dir /tmp/dist \
             --index-url ${PYTORCH_INDEX_URL} \
             torch; \
@@ -375,12 +381,12 @@ ARG PYTORCH_INDEX_URL
 ARG PYTORCH_FETCH_NIGHTLY
 ARG TORCHVISION_VERSION
 RUN if [ -z ${PYTORCH_FETCH_NIGHTLY} ]; then \
-        $conda run --name=${IVSN_ENV} python -m pip wheel \
+        $conda run  ${IVSN:+--name=${IVSN_ENV}} python -m pip wheel \
             --no-deps --wheel-dir /tmp/dist \
             --index-url ${PYTORCH_INDEX_URL} \
             torchvision==${TORCHVISION_VERSION}; \
     else \
-        $conda run --name=${IVSN_ENV} python -m pip wheel --pre \
+        $conda run ${IVSN:+--name=${IVSN_ENV}} python -m pip wheel --pre \
             --no-deps --wheel-dir /tmp/dist \
             --index-url ${PYTORCH_INDEX_URL} \
             torchvision; \

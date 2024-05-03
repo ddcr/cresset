@@ -170,7 +170,11 @@ services:
       dockerfile: dockerfiles/ngc.Dockerfile
       args:
         NGC_YEAR: ${NGC_YEAR:-23}
-        NGC_MONTH: ${NGC_MONTH:-12}
+        NGC_MONTH: ${NGC_MONTH:-10}
+        PYTORCH_VERSION: ${PYTORCH_VERSION:-2.1.2}
+        CUDA_VERSION: ${CUDA_VERSION:-12.1}
+        CUDNN_VERSION: ${CUDNN_VERSION:-8}
+        IMAGE_FLAVOR: ${IMAGE_FLAVOR:-devel}
 
   simple: # Service installed purely from official/verified Docker images and `conda`.
     extends:

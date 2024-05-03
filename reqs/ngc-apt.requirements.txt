@@ -3,3 +3,6 @@ sudo
 tmux
 tzdata
 zsh
+/tmp/apt/bat_0.22.1_amd64.deb
+/tmp/apt/glow_1.4.1_linux_amd64.deb
+/tmp/apt/ripgrep_13.0.0_amd64.deb

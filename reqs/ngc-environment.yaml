@@ -12,6 +12,10 @@ dependencies: # Use conda packages if possible.
   - hydra-core
   - jemalloc
   - lldb
+  - beartype
+  - conda-lock
+  - invoke
+  - loguru
 
   # For `pip` dependencies that are not available in conda.
   - pip

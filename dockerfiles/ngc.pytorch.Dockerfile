@@ -4,8 +4,17 @@
 ARG NGC_YEAR
 ARG NGC_MONTH
 ARG ADD_USER
+
+ARG PYTORCH_VERSION
+ARG CUDA_VERSION
+ARG CUDNN_VERSION
+ARG IMAGE_FLAVOR
+ARG LINUX_DISTRO=ubuntu
+ARG DISTRO_VERSION=20.04
+
 ARG GIT_IMAGE=bitnami/git:latest
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:${NGC_YEAR}.${NGC_MONTH}-py3
+# ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:${NGC_YEAR}.${NGC_MONTH}-py3
+ARG BASE_IMAGE=pytorch/pytorch:${PYTORCH_VERSION}-cuda${CUDA_VERSION}-cudnn${CUDNN_VERSION}-${IMAGE_FLAVOR}
 
 ########################################################################
 FROM ${GIT_IMAGE} AS stash
@@ -29,11 +38,15 @@ RUN mkdir -p /tmp/scripts && \
 # Copy `apt` and `conda` requirements for ngc images.
 COPY --link ../reqs/ngc-apt.requirements.txt /tmp/apt/requirements.txt
 COPY --link ../reqs/ngc-environment.yaml /tmp/env/environment.yaml
-# COPY --link ../reqs/ngc-pip.uninstalls.txt /tmp/pip/uninstalls.txt
 COPY --link ../third_party/*.deb /tmp/apt/
+
 
 ########################################################################
 FROM ${BASE_IMAGE} AS install-conda
+#
+# The observation bellow only applies to NGC
+#
+
 # Starting with the 22.11 PyTorch NGC container, miniforge is removed
 # and all Python packages are installed in the default Python environment.
 # A separate conda installation is provided to allow conda installation,
@@ -52,12 +65,12 @@ ARG CONDA_URL
 ARG CONDA_MANAGER
 WORKDIR /tmp/conda
 
+# Weird paths necessary because `CONDA_PREFIX` is immutable post-installation.
 ARG conda=/opt/conda/bin/${CONDA_MANAGER}
-RUN curl -fksSL -o /tmp/conda/miniconda.sh ${CONDA_URL} && \
-    /bin/bash /tmp/conda/miniconda.sh -b -p /opt/conda && \
-    printf "channels:\n  - conda-forge\n  - nodefaults\nssl_verify: false\n" > /opt/conda/.condarc && \
-    python=$(python -V | cut -d ' ' -f2) && \
-    $conda clean -fya && rm -rf /tmp/conda/miniconda.sh && \
+
+RUN --mount=type=bind,readwrite,from=stash,source=/tmp/scripts,target=/tmp/scripts \
+    POETRY_HOME=/opt/conda $conda run python /tmp/scripts/poetry_install.py -y && \
+    $conda clean -fya && \
     find /opt/conda -type d -name '__pycache__' | xargs rm -rf
 
 # Install the same version of Python as the system Python in the NGC image.
@@ -71,16 +84,31 @@ ARG CONDA_PKGS_DIRS=/opt/conda/pkgs
 RUN --mount=type=cache,target=${PIP_CACHE_DIR},sharing=locked \
     --mount=type=cache,target=${CONDA_PKGS_DIRS},sharing=locked \
     --mount=type=bind,readwrite,from=stash,source=/tmp/env,target=/tmp/env \
-    --mount=type=bind,readwrite,from=stash,source=/tmp/scripts,target=/tmp/scripts \
-    POETRY_HOME=/opt/conda python /tmp/scripts/poetry_install.py -y && \
+    # $conda create --copy -p /opt/conda python=$(python -V | cut -d ' ' -f2) && \
     {   echo "[global]"; \
         echo "index-url=${INDEX_URL}"; \
         echo "extra-index-url=${EXTRA_INDEX_URL}"; \
         echo "trusted-host=${TRUSTED_HOST}"; \
     } > ${PIP_CONFIG_FILE} && \
-    $conda env update -p /opt/conda --file /tmp/env/environment.yaml
+    $conda env update -p /opt/conda --file /tmp/env/environment.yaml && \
+    printf "channels:\n  - conda-forge\n  - nodefaults\nssl_verify: false\n" > /opt/conda/.condarc && \
+    $conda clean -y --all && \
+    find /opt/conda -type d -name '__pycache__' | xargs rm -rf
 
-RUN $conda clean -fya && find /opt/conda -type d -name '__pycache__' | xargs rm -rf
+########################################################################
+# NOT USED
+FROM ${BASE_IMAGE} AS install-brew
+
+LABEL maintainer="veritas9872@gmail.com"
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PYTHONIOENCODING=UTF-8
+ARG PYTHONDONTWRITEBYTECODE=1
+ARG PYTHONUNBUFFERED=1
+
+# Install HomeBrew.
+ARG BREW_URL=https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
+RUN NONINTERACTIVE=1 /bin/bash -c "$(curl -fksSL ${BREW_URL})"
 
 ########################################################################
 FROM ${BASE_IMAGE} AS train-base
@@ -101,15 +129,12 @@ ENV SHELL=''
 ARG TZ
 ARG DEBIAN_FRONTEND=noninteractive
 RUN --mount=type=bind,from=stash,source=/tmp/apt,target=/tmp/apt \
+    --mount=type=bind,from=stash,source=/tmp/scripts,target=/tmp/scripts \
     ln -snf /usr/share/zoneinfo/${TZ} /etc/localtime && echo ${TZ} > /etc/timezone && \
     apt-get update && \
     sed -e 's/#.*//g' -e 's/\r//g' /tmp/apt/requirements.txt | \
     xargs -r apt-get install -y --no-install-recommends && \
-    rm -rf /var/lib/apt/lists/*
-
-# Remove pre-installed `pip` packages that should use the versions installed via `conda` instead.
-# RUN --mount=type=bind,from=stash,source=/tmp/pip,target=/tmp/pip \
-#     python -m pip uninstall -y -r /tmp/pip/uninstalls.txt
+    rm -rf /var/lib/apt/lists/* 
 
 ########################################################################
 FROM train-base AS train-adduser-include
@@ -136,7 +161,7 @@ FROM train-base AS train-adduser-exclude
 # Most users may safely ignore this stage except when publishing an image
 # to a container repository for reproducibility.
 # Note that `zsh` configs are available but these images do not require `zsh`.
-COPY --link --from=install-conda /opt/conda /opt/conda
+COPY --link --from=install-conda /opt/conda      /opt/conda
 
 ########################################################################
 FROM train-adduser-${ADD_USER} AS train
@@ -145,7 +170,7 @@ ENV KMP_BLOCKTIME=0
 # ENV KMP_AFFINITY="granularity=fine,compact,1,0"
 # Use `/opt/conda/lib/libiomp5.so` for older NGC images using `conda`.
 # Using the older system MKL to prevent version clashes with NGC packages.
-ENV LD_PRELOAD=/usr/local/lib/libiomp5.so${LD_PRELOAD:+:${LD_PRELOAD}}
+# ENV LD_PRELOAD=/usr/local/lib/libiomp5.so${LD_PRELOAD:+:${LD_PRELOAD}}
 
 # Enable Intel MKL optimizations on AMD CPUs.
 # https://danieldk.eu/Posts/2020-08-31-MKL-Zen.html
@@ -153,7 +178,8 @@ ENV LD_PRELOAD=/usr/local/lib/libiomp5.so${LD_PRELOAD:+:${LD_PRELOAD}}
 ENV MKL_DEBUG_CPU_TYPE=5
 RUN echo 'int mkl_serv_intel_cpu_true() {return 1;}' > /tmp/fakeintel.c && \
     gcc -shared -fPIC -o /usr/local/bin/libfakeintel.so /tmp/fakeintel.c
-ENV LD_PRELOAD=/usr/local/bin/libfakeintel.so${LD_PRELOAD:+:${LD_PRELOAD}}
+# ENV LD_PRELOAD=/usr/local/bin/libfakeintel.so${LD_PRELOAD:+:${LD_PRELOAD}}
+
 # Configure Jemalloc as the default memory allocator.
 ENV LD_PRELOAD=/opt/conda/lib/libjemalloc.so${LD_PRELOAD:+:${LD_PRELOAD}}
 ENV MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,muzzy_decay_ms:30000"
@@ -171,9 +197,10 @@ COPY --link --from=stash /tmp/scripts/starship /usr/local/bin/starship
 # Search for additional Python packages installed via `conda`.
 RUN ln -s /opt/conda/lib/$(python -V | awk -F '[ \.]' '{print "python" $2 "." $3}') \
     /opt/conda/lib/python3 && \
+    # NO python installed in the system
     # Create a symbolic link to add Python `site-packages` to `PYTHONPATH`.
-    ln -s /usr/local/lib/$(python -V | awk -F '[ \.]' '{print "python" $2 "." $3}') \
-    /usr/local/lib/python3 && \
+    # ln -s /usr/local/lib/$(python -V | awk -F '[ \.]' '{print "python" $2 "." $3}') \
+    # /usr/local/lib/python3 && \
     # Setting the prompt to `pure`.
     {   echo "fpath+=${PURE_PATH}"; \
         echo "autoload -Uz promptinit; promptinit"; \
@@ -214,21 +241,23 @@ RUN ln -s /opt/conda/lib/$(python -V | awk -F '[ \.]' '{print "python" $2 "." $3
         echo "[conda]"; \
         echo "ignore_base = false"; \
     } >> ${ZDOTDIR}/.config/starship.toml && \
-    $conda init zsh
+    $conda init zsh && \
+    chown ${UID}:${GID} /opt/conda
 
+# ---- No need for pytorch docker image
 # No alternative to adding the `/opt/conda/bin` directory to `PATH`.
 # The `conda` binaries are placed at the end of the `PATH` to ensure that
 # system Python is used instead of `conda` python unlike in the other services.
 # If a `conda` package must have higher priority than a system package,
 # explicitly delete the system package as a workaraound.
-ENV PATH=${PATH}:/opt/conda/bin
+# ENV PATH=${PATH}:/opt/conda/bin
 
 # Configure `PYTHONPATH` to prioritize system packages over `conda` packages to
 # prevent conflict when `conda` installs different versions of the same package.
 ARG PROJECT_ROOT=/opt/project
-ENV PYTHONPATH=${PYTHONPATH:+${PYTHONPATH}:}${PROJECT_ROOT}
-ENV PYTHONPATH=${PYTHONPATH}:/usr/local/lib/python3/dist-packages
-ENV PYTHONPATH=${PYTHONPATH}:/opt/conda/lib/python3/site-packages
+# ENV PYTHONPATH=${PROJECT_ROOT}:/usr/local/lib/python3/dist-packages
+# ENV PYTHONPATH=${PYTHONPATH}:/opt/conda/lib/python3/site-packages
+ENV PYTHONPATH=${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}
 
 WORKDIR ${PROJECT_ROOT}
 CMD ["/bin/zsh"]
